@@ -85,7 +85,7 @@ A sample dataset (`test_data.xlsx`) is included for demonstration purposes. It c
 ---
 
 ### 🤝 **Contributors**
-- **Nebux Cloud, S.L.**
+- **Valendra Tech, S.L.**
   - Experts in AI-driven data analysis solutions.
 - **University of Cádiz (AGR-291 Research Group)**
   - Specializing in hydrocarbon characterization and spectroscopy.
