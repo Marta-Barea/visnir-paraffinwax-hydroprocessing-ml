@@ -2,53 +2,95 @@
 library(shiny)
 library(shinythemes)
 library(openxlsx)
-library(data.table)
 library(stringr)
 library(prospectr)
-library(caret)
 library(ranger)
 library(reshape2)
 library(ggplot2)
 library(viridis)
-library(fontawesome)
 
 # Loading saved model ----
-model <- readRDS("weighted_rf.rds")
-
-# Preload test data ----
-test_data <- openxlsx::read.xlsx("test_data.xlsx", sheet = 1)
+model <- readRDS("rf.rds")
 
 # Server ----
 server <- function(input, output) {
-  data_submitted <- reactiveVal(FALSE)
-  
-  observeEvent(input$submitbutton, {
-    data_submitted(TRUE)
-  })
-  
-  uploaded_data <- reactive({
+  uploaded_data <- eventReactive(input$submitbutton, {
     req(input$file1)
-    if (stringr::str_ends(input$file1$datapath, "csv")) {
-      read.csv(input$file1$datapath, header = input$header, sep = input$sep, quote = input$quote)
-    } else if (stringr::str_ends(input$file1$datapath, "(xlsx|xls)")) {
-      openxlsx::read.xlsx(input$file1$datapath, colNames = input$header, sheet = as.numeric(input$sheet))
+    uploaded_name <- tolower(input$file1$name)
+
+    if (stringr::str_ends(uploaded_name, "csv")) {
+      read.csv(
+        input$file1$datapath,
+        header = input$header,
+        sep = input$sep,
+        quote = input$quote,
+        check.names = FALSE
+      )
+    } else if (stringr::str_ends(uploaded_name, "(xlsx|xls)")) {
+      openxlsx::read.xlsx(
+        input$file1$datapath,
+        colNames = input$header,
+        sheet = as.numeric(input$sheet),
+        check.names = FALSE
+      )
+    } else {
+      validate("Unsupported file format. Please upload a .csv, .xlsx or .xls file.")
     }
-  })
+  }, ignoreNULL = TRUE)
+
+  processed_data <- eventReactive(input$submitbutton, {
+    df <- uploaded_data()
+    sample_ids <- as.character(df[[1]])
+    df_numeric <- df[, sapply(df, is.numeric), drop = FALSE]
+
+    validate(
+      need(ncol(df_numeric) > 0, "No numeric spectral columns were found in the uploaded file.")
+    )
+
+    spectra_input <- data.frame(Sample = sample_ids, df_numeric, check.names = FALSE)
+    spectra_input[, -1] <- msc(as.matrix(spectra_input[, -1, drop = FALSE]))
+
+    spectra_mean <- aggregate(. ~ Sample, spectra_input, mean)
+    spectra_long <- melt(spectra_mean, id.vars = "Sample")
+    spectra_long$variable <- as.numeric(as.character(spectra_long$variable))
+
+    df_sg <- savitzkyGolay(X = as.matrix(df_numeric), p = 3, w = 11, m = 1)
+    colnames(df_sg) <- ifelse(
+      !startsWith(colnames(df_sg), "X"),
+      paste0("X", colnames(df_sg)),
+      colnames(df_sg)
+    )
+
+    expected_vars <- model$forest$independent.variable.names
+    missing_vars <- setdiff(expected_vars, colnames(df_sg))
+
+    validate(
+      need(
+        length(missing_vars) == 0,
+        paste("Missing required variables:", paste(missing_vars, collapse = ", "))
+      )
+    )
+
+    prediction_data <- as.data.frame(df_sg[, expected_vars, drop = FALSE], check.names = FALSE)
+    predictions <- predict(model, data = prediction_data)$predictions
+
+    list(
+      preview = df[, seq_len(min(ncol(df), 8)), drop = FALSE],
+      spectra_long = spectra_long,
+      predictions = data.frame(
+        Sample = sample_ids,
+        `Hydroprocessing Grade` = predictions,
+        check.names = FALSE
+      )
+    )
+  }, ignoreNULL = TRUE)
   
   output$dataTable <- renderTable({
-    req(data_submitted())
-    head(uploaded_data())
+    processed_data()$preview
   })
   
   output$spectraPlot <- renderPlot({
-    req(data_submitted())
-    df <- uploaded_data()
-    df_numeric <- df[, sapply(df, is.numeric)]
-    df_numeric <- cbind(Sample = df[, 1], df_numeric)
-    df_numeric[,-1] <- msc(df_numeric[,-1])
-    df_mean <- aggregate(. ~ Sample, df_numeric, mean)
-    df_long <- melt(df_mean, id.vars = "Sample")
-    df_long$variable <- as.numeric(as.character(df_long$variable))
+    df_long <- processed_data()$spectra_long
     
     ggplot(data = df_long, aes(x = variable, y = value, color = Sample, group = Sample)) + 
       geom_line() +
@@ -62,44 +104,16 @@ server <- function(input, output) {
       scale_x_continuous()  # Ensure a continuous X-axis
   })
   
-  contents1 <- reactive({
-    req(data_submitted())
-    df <- uploaded_data()
-    
-    # Ensure columns are numeric
-    df_numeric <- df[, sapply(df, is.numeric)]
-    
-    # Apply Savitzky-Golay filter
-    df_sg <- savitzkyGolay(X = df_numeric, p = 3, w = 11, m = 1)
-    
-    # Modify column names in the Savitzky-Golay processed data to add "X" prefix if needed
-    colnames(df_sg) <- ifelse(!startsWith(colnames(df_sg), "X"),
-                              paste0("X", colnames(df_sg)),
-                              colnames(df_sg))
-    
-    # Check for required variables
-    expected_vars <- model$forest$independent.variable.names
-    actual_vars <- colnames(df_sg)
-    
-    if (!all(expected_vars %in% actual_vars)) {
-      stop("Error: Missing required variables: ", paste(setdiff(expected_vars, actual_vars), collapse = ", "))
-    }
-    
-    # Make predictions
-    predictions <- predict(model, data = df_sg)$predictions
-    
-    # Rename the column to "Hydroprocessing Grade"
-    cbind.data.frame(Sample = rownames(df_sg), `Hydroprocessing Grade` = predictions)
-  })
-  
   output$predictions <- renderTable({
-    req(data_submitted())
-    isolate(contents1())
+    processed_data()$predictions
   })
   
   output$downloadData <- downloadHandler(
     filename = function() { paste0("test_data_", Sys.Date(), ".xlsx") },
-    content = function(file) { openxlsx::write.xlsx(test_data, file, overwrite = TRUE) },
+    content = function(file) {
+      test_data <- openxlsx::read.xlsx("test_data.xlsx", sheet = 1)
+      openxlsx::write.xlsx(test_data, file, overwrite = TRUE)
+    },
     contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
   )
 }
@@ -131,7 +145,7 @@ ui <- fluidPage(
                         column(12, div(class = "card",
                                        h3(class = "card-title", "What is HydroGrade AI?"),
                                        p(class = "card-text", "HydroGrade AI is an advanced application for analyzing paraffins using Vis-NIR spectroscopy. It employs powerful preprocessing techniques like Savitzky-Golay filtering and Multiplicative Scatter Correction (MSC) to clean and enhance spectral data."),
-                                       p(class = "card-text", "The core of the app is a Weighted Random Forest model, designed for precision in hydroprocessing grade classification.")
+                                       p(class = "card-text", "The core of the app is a Random Forest model, designed for precision in hydroprocessing grade classification.")
                         ))
                       ),
                       fluidRow(
@@ -220,13 +234,13 @@ ui <- fluidPage(
              tabPanel("Collaborators",
                       fluidRow(
                         column(6, div(class = "card text-center",
-                                      tags$img(src = "uca.png", alt = "University of Cádiz Logo", width = "80%"),
+                                      tags$img(src = "uca.png", alt = "University of Cádiz Logo", width = "80%", loading = "lazy", decoding = "async"),
                                       h4("University of Cádiz"),
                                       p("Collaborating in advanced analytical methods and spectroscopy data analysis."),
                                       tags$a(href = "https://www.uca.es", target = "_blank", class = "btn btn-primary", "Visit Website")
                         )),
                         column(6, div(class = "card text-center",
-                                      tags$img(src = "agr291.png", alt = "AGR-291 Logo", width = "80%"),
+                                      tags$img(src = "agr291.png", alt = "AGR-291 Logo", width = "80%", loading = "lazy", decoding = "async"),
                                       h4("AGR-291 Research Group"),
                                       p("Experts in hydrocarbon characterization and spectroscopic techniques."),
                                       tags$a(href = "https://agr291.uca.es", target = "_blank", class = "btn btn-primary", "Visit Website")
@@ -234,21 +248,21 @@ ui <- fluidPage(
                       ),
                       fluidRow(
                         column(6, div(class = "card text-center",
-                                      tags$img(src = "fundacioncepsa.png", alt = "Fundación Cepsa Logo", width = "80%"),
+                                      tags$img(src = "fundacioncepsa.png", alt = "Fundación Cepsa Logo", width = "80%", loading = "lazy", decoding = "async"),
                                       h4("Cátedra Fundación Cepsa"),
                                       p("Providing financial support for the project's development."),
                                       tags$a(href = "https://catedrafundacioncepsa.uca.es", target = "_blank", class = "btn btn-primary", "Visit Website")
                         )),
                         column(6, div(class = "card text-center",
-                                      tags$img(src = "nebux.png", alt = "Nebux Cloud Logo", width = "80%"),
-                                      h4("Nebux Cloud S.L."),
+                                      tags$img(src = "valendra.png", alt = "Valendra Logo", width = "80%", loading = "lazy", decoding = "async"),
+                                      h4("Valendra"),
                                       p("AI solutions for efficient data analysis."),
-                                      tags$a(href = "https://nebux.cloud", target = "_blank", class = "btn btn-primary", "Visit Website")
+                                      tags$a(href = "https://valendra.tech", target = "_blank", class = "btn btn-primary", "Visit Website")
                         ))
                       ),
                       fluidRow(
                         column(6, div(class = "card text-center",
-                                      tags$img(src = "moeve.png", alt = "Moeve Global Logo", width = "80%"),
+                                      tags$img(src = "moeve.png", alt = "Moeve Global Logo", width = "80%", loading = "lazy", decoding = "async"),
                                       h4("Moeve Global"),
                                       p("Providing financial support for the project's development."),
                                       tags$a(href = "https://www.moeveglobal.com/es/", target = "_blank", class = "btn btn-primary", "Visit Website")

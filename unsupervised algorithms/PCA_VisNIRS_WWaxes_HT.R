@@ -1,16 +1,41 @@
 # Load Required Libraries
-library(doParallel)
 library(readxl)
 library(prospectr)
 library(cluster)
 library(factoextra)
 library(data.table)
-library(egg)
 library(viridis)
 
-# Load Parallelization
-cl <- makePSOCKcluster(8)
-registerDoParallel(cl)
+figures_dir <- file.path(getwd(), "Figures")
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+save_stacked_plots <- function(plots, filename, width = 12, height = 12, res = 600) {
+  png(
+    filename = filename,
+    width = width,
+    height = height,
+    units = "in",
+    res = res,
+    bg = "white",
+    type = "cairo-png"
+  )
+
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(layout = grid::grid.layout(length(plots), 1)))
+
+  for (i in seq_along(plots)) {
+    print(plots[[i]], vp = grid::viewport(layout.pos.row = i, layout.pos.col = 1))
+  }
+
+  grDevices::dev.off()
+}
+
+# Load Parallelization when available
+cl <- NULL
+if (requireNamespace("doParallel", quietly = TRUE)) {
+  cl <- parallel::makePSOCKcluster(8)
+  doParallel::registerDoParallel(cl)
+}
 
 # Load data
 pw_data <- read_excel("~/Documents/Doctorado/Tesis Doctoral/Investigación Cepsa/Vis-NIR/XDS-NIR_FOSS/Estudio según Tipo de Parafina e Hidrotratamiento/NIRS_HT_PW.xlsx",
@@ -60,10 +85,13 @@ scatter_plot <- ggplot(scores_pca, aes(x = PC1, y = PC2, col = waxes, label = ro
   labs(x = "PC1 (55.0%)", y = "PC2 (23.5%)", title = "") + 
   theme(axis.title = element_text(size = 12), 
         legend.title = element_text(size = 10, face = "bold"),
-        legend.text = element_text(size = 12)) +
+      legend.text = element_text(size = 12),
+      plot.tag = element_text(face = "bold", size = 16),
+      plot.tag.position = c(0.01, 0.99)) +
   theme_test() +
   scale_color_viridis(discrete = TRUE, option = "D") +
-  scale_fill_viridis(discrete = TRUE)
+    scale_fill_viridis(discrete = TRUE) +
+    labs(tag = "A")
 
 scatter_plot
 
@@ -79,22 +107,25 @@ loadings_plot <- ggplot(ld, aes(x = rn, y = value, fill = variable)) +
   theme(legend.title = element_blank(),
         legend.text = element_text(size = 8),
         axis.text = element_text(size = 8, hjust = 1, angle = 90),
-        axis.title = element_text(size = 8)) +
+    axis.title = element_text(size = 8),
+    plot.tag = element_text(face = "bold", size = 16),
+    plot.tag.position = c(0.01, 0.99)) +
   labs(x = "Wavelength (nm)", y = "Loadings PCs", title = "") +
   scale_x_discrete(limits = loadings$rn,
                    breaks = loadings$rn[seq(1, length(loadings$rn), by = 100)]) +
   scale_fill_manual(values = c("#FDE725FF", "#440154FF")) +
-  geom_hline(yintercept = c(0.05, -0.05), linetype = "dotted")
+  geom_hline(yintercept = c(0.05, -0.05), linetype = "dotted") +
+  labs(tag = "B")
   
 loadings_plot
 
 # Combining plots
-scatterloadings_plot <- ggarrange(scatter_plot, loadings_plot,
-                                  ncol = 1,
-                                  nrow = 2,
-                                  labels = c("A", "B"))
-
-scatterloadings_plot
+save_stacked_plots(
+  plots = list(scatter_plot, loadings_plot),
+  filename = file.path(figures_dir, "Fig.3.png")
+)
 
 # Stop Parallelization
-stopCluster(cl)
+if (!is.null(cl)) {
+  parallel::stopCluster(cl)
+}

@@ -1,17 +1,27 @@
 # Load Required Libraries
-library(doParallel)
 library(readxl)
 library(prospectr)
 library(caret)
 library(stringr)
 library(dplyr)
 library(ggplot2)
-library(ggiraphExtra)
 library(ranger)
 
-# Load Parallelization
-cl <- makePSOCKcluster(8)
-registerDoParallel(cl)
+figures_dir <- file.path(getwd(), "Figures")
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+app_dir_candidates <- c(file.path(getwd(), "App"), file.path(getwd(), "..", "App"))
+app_dir <- app_dir_candidates[file.exists(app_dir_candidates)][1]
+if (is.na(app_dir)) {
+  app_dir <- app_dir_candidates[1]
+  dir.create(app_dir, recursive = TRUE, showWarnings = FALSE)
+}
+
+# Load Parallelization when available
+cl <- NULL
+if (requireNamespace("doParallel", quietly = TRUE)) {
+  cl <- parallel::makePSOCKcluster(8)
+  doParallel::registerDoParallel(cl)
+}
 
 # Load Data
 pw_data <- read_excel("~/Documents/Doctorado/Tesis Doctoral/Investigación Cepsa/Vis-NIR/XDS-NIR_FOSS/Estudio según Tipo de Parafina e Hidrotratamiento/NIRS_HT_PW.xlsx",
@@ -36,12 +46,6 @@ pw_test <- pw_sg[-intrain,]
 colnames(pw_train) <- make.names(colnames(pw_train))
 colnames(pw_test) <- make.names(colnames(pw_test))
 
-# Calculate Class Weights
-class_counts <- table(pw_train$Sample)
-inverse_weights <- 1 / class_counts
-normalized_weights <- inverse_weights / sum(inverse_weights)
-weights_vector <- as.numeric(normalized_weights[pw_train$Sample])
-
 # Define parameter grid for ranger
 rf_grid <- expand.grid(
   mtry = c(sqrt(ncol(pw_train[,-1]))),             # Example values for mtry
@@ -54,7 +58,7 @@ params <- expand.grid(ntrees = ntrees)
 
 store_maxnode <- vector("list", nrow(params))
 
-# Hyperparameter tuning with weights
+# Hyperparameter tuning
 set.seed(537)
 trctrl <- trainControl(method = "cv", number = 10)
 
@@ -66,13 +70,12 @@ for(i in 1:nrow(params)) {
   rf_model <- train(
     Sample ~ ., 
     data = pw_train,
-    method = "ranger",                 # Using ranger to allow case weights
+    method = "ranger",
     metric = "Accuracy",
-    tuneGrid = rf_grid,                # Passing the required grid
+    tuneGrid = rf_grid,
     trControl = trctrl,
-    num.trees = ntree,                 # Setting the number of trees dynamically
-    importance = "permutation",
-    case.weights = weights_vector      # Adding weights for class balancing
+    num.trees = ntree,
+    importance = "permutation"
   )
   store_maxnode[[i]] <- rf_model
 }
@@ -102,21 +105,20 @@ plot(x = ntrees,
      lty = 2,
      col = "#287D8EFF",
      xlab = "Number of decision trees",
-     ylab = "Accuracy (%) (5-Fold CV)")
+  ylab = "Accuracy (%) (10-Fold CV)")
 
-# Final RF model with ranger using weights
+# Final RF model with ranger
 set.seed(537)
 
 start_time_2 <- Sys.time()
 
-best_rf_weighted <- ranger(
+best_rf <- ranger(
   formula = Sample ~ ., 
   data = pw_train, 
   num.trees = 100, 
-  mtry = c(sqrt(ncol(pw_train[,-1]))),                           # Best mtry based on tuning results
+  mtry = c(sqrt(ncol(pw_train[,-1]))),
   splitrule = "gini",
-  min.node.size = 5,                  # Best min.node.size based on tuning results
-  case.weights = weights_vector,
+  min.node.size = 5,
   importance = 'permutation',
   classification = TRUE
 )
@@ -124,20 +126,20 @@ best_rf_weighted <- ranger(
 total_time_2 <- Sys.time() - start_time_2
 print(total_time_2)
 
-saveRDS(best_rf_weighted, "~/Documents/GitHub/machine-learning_VisNIR_ParaffinWax_HT/App/weighted_rf.rds")
+saveRDS(best_rf, file.path(app_dir, "rf.rds"))
 
-# Train set performance for Weighted RF
-pred_train_weighted <- predict(best_rf_weighted, pw_train)$predictions
-cmatrix_train_weighted <- confusionMatrix(as.factor(pred_train_weighted), pw_train$Sample)
-print(cmatrix_train_weighted)
+# Train set performance for RF
+pred_train <- predict(best_rf, pw_train)$predictions
+cmatrix_train <- confusionMatrix(as.factor(pred_train), pw_train$Sample)
+print(cmatrix_train)
 
-# Test set performance for Weighted RF
-pred_test_weighted <- predict(best_rf_weighted, pw_test)$predictions
-cmatrix_test_weighted <- confusionMatrix(as.factor(pred_test_weighted), pw_test$Sample)
-print(cmatrix_test_weighted)
+# Test set performance for RF
+pred_test <- predict(best_rf, pw_test)$predictions
+cmatrix_test <- confusionMatrix(as.factor(pred_test), pw_test$Sample)
+print(cmatrix_test)
 
 # Variable Importance
-var_imp <- importance(best_rf_weighted)
+var_imp <- importance(best_rf)
 
 # Convert to DataFrame for visualization
 var_imp_df <- data.frame(
@@ -154,7 +156,7 @@ print(var_imp_df)
 var_imp_df$Variable <- gsub("^X", "", var_imp_df$Variable)
 
 # Create the plot with a gradient of colors
-ggplot(var_imp_df[1:10, ], aes(x = reorder(Variable, Importance), y = Importance, fill = Importance)) +
+importance_plot <- ggplot(var_imp_df[1:10, ], aes(x = reorder(Variable, Importance), y = Importance, fill = Importance)) +
   geom_bar(stat = "identity") +
   coord_flip() +
   scale_fill_gradientn(colors = c("#FDE725FF", "#287D8EFF", "#440154FF", "#73D055FF", "#404788FF")) +
@@ -164,5 +166,19 @@ ggplot(var_imp_df[1:10, ], aes(x = reorder(Variable, Importance), y = Importance
   theme_light() +
   theme(legend.position = "right")
 
+importance_plot
+
+ggsave(
+  filename = file.path(figures_dir, "Fig.5.png"),
+  plot = importance_plot,
+  width = 10,
+  height = 10,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
 # Stop Parallelization
-stopCluster(cl)
+if (!is.null(cl)) {
+  parallel::stopCluster(cl)
+}

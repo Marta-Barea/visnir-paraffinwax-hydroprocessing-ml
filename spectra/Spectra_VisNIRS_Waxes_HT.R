@@ -1,16 +1,41 @@
 # Load Required Libraries
-library(doParallel)
 library(readxl)
 library(dplyr)
 library(data.table)
 library(ggplot2)
 library(prospectr)
-library(egg)
 library(viridis)  
 
-# Load Parallelization
-cl <- makePSOCKcluster(8)
-registerDoParallel(cl)
+figures_dir <- file.path(getwd(), "Figures")
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+save_stacked_plots <- function(plots, filename, width = 12, height = 12, res = 600) {
+  png(
+    filename = filename,
+    width = width,
+    height = height,
+    units = "in",
+    res = res,
+    bg = "white",
+    type = "cairo-png"
+  )
+
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(layout = grid::grid.layout(length(plots), 1)))
+
+  for (i in seq_along(plots)) {
+    print(plots[[i]], vp = grid::viewport(layout.pos.row = i, layout.pos.col = 1))
+  }
+
+  grDevices::dev.off()
+}
+
+# Load Parallelization when available
+cl <- NULL
+if (requireNamespace("doParallel", quietly = TRUE)) {
+  cl <- parallel::makePSOCKcluster(8)
+  doParallel::registerDoParallel(cl)
+}
 
 # Load data
 pw_data <- read_excel("~/Documents/Doctorado/Tesis Doctoral/Investigación Cepsa/Vis-NIR/XDS-NIR_FOSS/Estudio según Tipo de Parafina e Hidrotratamiento/NIRS_HT_PW.xlsx",
@@ -32,11 +57,14 @@ spectra_plot <- ggplot(data = df, aes(x = variable, y = value, color = Sample, g
   theme(legend.title = element_blank(),
         legend.text = element_text(size = 8),
         axis.text = element_text(size = 8, hjust = 1, angle = 90),
-        axis.title = element_text(size = 8)) +
+      axis.title = element_text(size = 8),
+      plot.tag = element_text(face = "bold", size = 16),
+      plot.tag.position = c(0.01, 0.99)) +
   scale_x_discrete(limits = df$variable,
                    breaks = df$variable[seq(1, length(df$variable), by = 300)]) +
   scale_color_viridis(discrete = TRUE, option = "D") +
-  scale_fill_viridis(discrete = TRUE) 
+    scale_fill_viridis(discrete = TRUE) +
+    labs(tag = "A")
 
 spectra_plot
 
@@ -57,19 +85,24 @@ savitzky_plot <- ggplot(data = df_2, aes(x = variable, y = value, color = Sample
   theme(legend.title = element_blank(),
         legend.text = element_text(size = 8),
         axis.text = element_text(size = 8, hjust = 1, angle = 90),
-        axis.title = element_text(size = 8)) +
+        axis.title = element_text(size = 8),
+        plot.tag = element_text(face = "bold", size = 16),
+        plot.tag.position = c(0.01, 0.99)) +
   scale_x_discrete(limits = df_2$variable,
                    breaks = df_2$variable[seq(1, length(df_2$variable), by = 300)]) +
   scale_color_viridis(discrete = TRUE, option = "D")+
-  scale_fill_viridis(discrete = TRUE) 
+  scale_fill_viridis(discrete = TRUE) +
+  labs(tag = "B")
 
 savitzky_plot
 
 # Combining plots
-spectrasvitzky_plot <- ggarrange(spectra_plot, savitzky_plot,
-                                 ncol = 1, nrow = 2,
-                                 labels = c("A", "B"))
-spectrasvitzky_plot
+save_stacked_plots(
+  plots = list(spectra_plot, savitzky_plot),
+  filename = file.path(figures_dir, "Fig.1.png")
+)
 
 # Stop Parallelization
-stopCluster(cl)
+if (!is.null(cl)) {
+  parallel::stopCluster(cl)
+}

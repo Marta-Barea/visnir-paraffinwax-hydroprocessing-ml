@@ -1,14 +1,19 @@
 # Load Required Libraries
-library(doParallel)
 library(readxl)
 library(prospectr)
 library(cluster)
 library(purrr)
 library(factoextra)
 
-# Load Parallelization
-cl <- makePSOCKcluster(8)
-registerDoParallel(cl)
+figures_dir <- file.path(getwd(), "Figures")
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Load Parallelization when available
+cl <- NULL
+if (requireNamespace("doParallel", quietly = TRUE)) {
+  cl <- parallel::makePSOCKcluster(8)
+  doParallel::registerDoParallel(cl)
+}
 
 # Load data
 pw_data <- read_excel("~/Documents/Doctorado/Tesis Doctoral/Investigación Cepsa/Vis-NIR/XDS-NIR_FOSS/Estudio según Tipo de Parafina e Hidrotratamiento/NIRS_HT_PW.xlsx",
@@ -79,7 +84,6 @@ set.seed(5665)
 dendrogram <- fviz_dend(x = hc1, 
                         show_labels = TRUE, 
                         cex = 0.7,
-                        lwd = 0.5,
                         main = "",
                         xlab = "Samples",
                         ylab = "Dendogram using Ward's linkage and Euclidean distance",
@@ -93,5 +97,17 @@ dendrogram <- fviz_dend(x = hc1,
 
 dendrogram
 
+ggplot2::ggsave(
+  filename = file.path(figures_dir, "Fig.2.png"),
+  plot = dendrogram,
+  width = 12,
+  height = 10,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
 # Stop Parallelization
-stopCluster(cl)
+if (!is.null(cl)) {
+  parallel::stopCluster(cl)
+}
